@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+vary: Origin
+access-control-allow-credentials: true
+content-type: application/json; charset=utf-8
+set-cookie: session=2605709363d6c7ab8dbb86bf98cfa569a257b6c20efea9b7d2a41adf7e35384d; Max-Age=604800; Path=/; HttpOnly; SameSite=Lax
+content-length: 122
+Date: Fri, 23 Oct 2026 10:42:48 GMT
+Connection: keep-alive
+Keep-Alive: timeout=72
+

@@ -1,0 +1,554 @@
+/// JobPilot Prisma schema.
+/// Covers the full platform data model for all phases. Phase 0 uses a subset
+/// (User, Session, Profile, Cv, ExtractedCvData, and supporting entities);
+/// later phases add Job, JobDiscovery, JobMatch, Application, Notification,
+/// ScheduledSearch, Source, StoredSecret, AuditLog.
+///
+/// IMPORTANT distinctions:
+/// - OpportunityType = what kind of opportunity this is (career / life-stage
+///   sense): IT/Industrial Training, Internship, Graduate/Entry-level,
+///   Full-time, Part-time, Contract, Freelance.
+/// - EmploymentType = contractual arrangement: permanent, fixed_term,
+///   temporary, self_employed, apprenticeship.
+/// - WorkArrangement = where/how work is performed: remote, hybrid, onsite.
+/// These are three independent dimensions; a job has all three.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Enumerations
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Opportunity type = what kind of opportunity this is (career / life-stage).
+// IT/Industrial Training and Internship are opportunity types, separate from
+// full-time / part-time / contract / freelance, which are also opportunity
+// types here. EmploymentType (below) is the *contractual arrangement* and is
+// independent of opportunity type.
+enum OpportunityType {
+  ItIndustrialTraining   // IT / Industrial Training (student-focused training placement)
+  Internship             // Internship (short-term, learning-focused)
+  GraduateEntryLevel     // Graduate / Entry-level (first professional role after study)
+  FullTime               // Full-time permanent position
+  PartTime               // Part-time position
+  Contract               // Fixed-term contract role
+  Freelance              // Freelance / self-employed engagement
+  Other                  // Other, with a note
+}
+
+// Employment type = the contractual employment arrangement of a role.
+// This is INDEPENDENT of opportunity type. E.g. a job can be
+// opportunityType=Contract, employmentType=FixedTerm.
+enum EmploymentType {
+  Permanent        // Ongoing permanent employment
+  FixedTerm        // Fixed-term contract
+  Temporary        // Temporary / casual
+  SelfEmployed     // Self-employed / freelance contractor
+  Apprenticeship   // Apprenticeship (distinct legal/structural form in some regions)
+  Other            // Other employment arrangement
+}
+
+// Work arrangement = where/how the work is performed.
+enum WorkArrangement {
+  Remote           // Fully remote
+  Hybrid           // Hybrid (some days in office)
+  OnSite           // Fully on-site
+  Unknown          // Not specified / unknown
+}
+
+// Application lifecycle states. Approval-first by default:
+// draft → ready_for_review → approved → submitted → (interview | offer | rejected | withdrawn | other)
+enum ApplicationState {
+  Draft
+  ReadyForReview   // Prepared, awaiting user approval
+  Approved         // User approved; pending submission (or submitted, depending on boundary)
+  Submitted        // Submitted to the employer
+  Interview        // Employer responded with an interview
+  Offer            // Offer received
+  Rejected         // Rejected
+  Withdrawn        // User withdrew
+  Other            // Other state, with a note
+}
+
+// CV processing status.
+enum ProcessingStatus {
+  Uploaded         // File stored, not yet processed
+  Processing       // Text extraction / AI analysis in progress
+  Ready            // Processing complete, extracted data available
+  Failed           // Processing failed
+}
+
+// Discovery status for a job seen by a profile.
+enum DiscoveryStatus {
+  New              // Found, not yet presented to the user
+  Seen             // Presented to the user
+  Saved            // User saved it
+  Dismissed        // User dismissed it
+  Applied          // User applied to it (linked to an Application)
+  Other            // Other status, with a note
+}
+
+// Match recommendation.
+enum MatchRecommendation {
+  Relevant
+  Maybe
+  NotRelevant
+}
+
+// User account status.
+enum UserStatus {
+  Active
+  EmailUnverified
+  Suspended
+}
+
+// Profile status.
+enum ProfileStatus {
+  Active
+  Archived
+}
+
+// Notification types.
+enum NotificationType {
+  NewJobs
+  ApplicationStatus
+  BrowserInputRequired
+  EmailDraftReady
+  ScheduledSearchResults
+  Other
+}
+
+// Job source status.
+enum SourceStatus {
+  Active
+  Inactive
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Core entities
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  emailVerified Boolean   @default(false)
+  status        UserStatus @default(Active)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sessions      Session[]
+  profiles      Profile[]
+  cvs          Cv[]
+  applications  Application[]
+  notifications Notification[]
+  jobDiscoveries JobDiscovery[]   @relation("DiscoveredByUser")
+  jobMatches    JobMatch[]        @relation("MatchedForUser")
+  storedSecrets StoredSecret[]
+  scheduledSearches ScheduledSearch[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique // session token (opaque, securely generated)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Profile {
+  id                           String        @id @default(uuid())
+  userId                       String
+  user                         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                         String
+  status                       ProfileStatus @default(Active)
+  createdAt                    DateTime      @default(now())
+  updatedAt                    DateTime      @updatedAt
+
+  // Who this profile is (status + target roles)
+  accountStatus                UserStatus?   @default(Active) // student | graduate | professional | other
+  targetRoles                  String?       // free text or JSON of target job titles
+  experienceLevel              String?       // entry | mid | senior | other
+  skillsOfInterest             String?       // JSON array of skills
+
+  // Student-specific fields (first-class, not buried in JSON)
+  institution                  String?
+  degree                       String?
+  fieldOfStudy                 String?
+  currentAcademicLevel         String?       // e.g. "Year 2", "Master's", etc.
+  expectedGraduationDate       DateTime?
+  itIndustrialTrainingRequired Boolean       @default(false)
+  itIndustrialTrainingDetails  String?
+  internshipDuration           String?       // preferred duration or range (text)
+  internshipStartDate          DateTime?
+  internshipEndDate            DateTime?
+
+  // Preferences
+  workArrangementPreference    WorkArrangement @default(Unknown)
+  employmentTypePreference     String         // JSON array of EmploymentType values the user accepts
+  salaryMin                    Int?
+  salaryMax                    Int?
+  salaryCurrency               String         @default("USD")
+  countries                    String?        // JSON array of country codes
+  locations                    String?        // JSON array of location strings
+  relocationPreference         String         @default("not_willing") // "willing" | "not_willing" | "with_conditions" + notes
+  relocationNotes              String?
+  otherPreferences             String?        // JSON for things not yet first-class
+
+  // Active CV (the one currently favored for this profile; nullable because a profile can exist without a CV)
+  activeCvId                   String?       // will be a relation to Cv in a later step if desired; for now stored as a value for simplicity
+
+  // Relations
+  jobDiscoveries               JobDiscovery[] @relation("DiscoveredByProfile")
+  jobMatches                   JobMatch[]     @relation("MatchedForProfile")
+  applications                 Application[]
+  scheduledSearches            ScheduledSearch[]
+  profileCvLinks               ProfileCv[]
+
+  @@unique([userId, name])     // one profile name per user
+  @@index([userId])
+  @@map("profiles")
+}
+
+// NOTE: activeCvId is stored as a plain String for Phase 0 simplicity.
+// It can be converted to a proper Prisma relation later without data loss.
+// See Cv.id format (uuid) for compatibility.
+
+model Cv {
+  id              String          @id @default(uuid())
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label           String
+  fileType        String          // e.g. "pdf", "txt", "md", "docx"
+  storagePath     String          // relative path inside the local storage/ directory (Phase 0)
+  storageUrl      String?         // nullable; set when using remote blob storage later
+  size            Int             // bytes
+  uploadedAt      DateTime        @default(now())
+  processedAt     DateTime?
+  processingStatus ProcessingStatus @default(Uploaded)
+  active          Boolean         @default(true)
+
+  // Relations
+  profiles                     ProfileCv[]
+  extractedData                ExtractedCvData?
+  applications                 Application[]
+
+  @@unique([userId, label, storagePath]) // avoid duplicate uploads with same label+path per user
+  @@index([userId])
+  @@map("cvs")
+}
+
+// Many-to-many join: Profile ↔ Cv (a CV can be linked to multiple profiles, and a profile can link multiple CVs)
+model ProfileCv {
+  profileId  String
+  profile    Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  cvId       String
+  cv         Cv      @relation(fields: [cvId], references: [id], onDelete: Cascade)
+
+  @@id([profileId, cvId])
+  @@map("profile_cvs")
+}
+
+// Extracted CV data — the AI-extracted structured content for a CV.
+// This is the replacement for the old "CandidateProfile" type, which
+// conflated extracted CV data with search preferences. Now split:
+//   - Cv + ExtractedCvData = the extracted CV content
+//   - Profile = the user's search identity + preferences
+model ExtractedCvData {
+  id           String   @id @default(uuid())
+  cvId         String   @unique
+  cv           Cv       @relation(fields: [cvId], references: [id], onDelete: Cascade)
+
+  // Structured extraction (JSON)
+  data         String   // JSON: name, contact, education, skills, experience, internships, projects, certifications, languages, etc.
+
+  extractedAt  DateTime @default(now())
+  provider     String?  // which AI provider produced this (e.g. "openai-compatible")
+  model        String?  // which model
+  schemaVersion String  @default("1.0.0")
+
+  @@map("extracted_cv_data")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Job discovery + matching (Phase 2+ entities — schema-ready now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Canonical Job — the discovered job itself, shared across users/profiles.
+// NOT user-owned. One row per unique source job.
+model Job {
+  id               String        @id @default(uuid())
+  sourceId         String
+  source           Source        @relation(fields: [sourceId], references: [id])
+  sourceJobId      String        // the source's own job identifier
+
+  // Core job data
+  title            String
+  company          String
+  locationOriginal String?
+  locationNormalized String?     // normalized location string
+  workArrangement  WorkArrangement
+  opportunityType  OpportunityType
+  employmentType   EmploymentType
+
+  // Salary (when available)
+  salaryMin        Int?
+  salaryMax        Int?
+  salaryCurrency   String        @default("USD")
+  salaryText       String?       // original salary text from the source
+
+  // Description
+  descriptionText  String?
+  descriptionHtml  String?
+  requiredSkills   String?       // JSON array of skills
+
+  // Application
+  applicationUrl   String?
+
+  // Deadline (if available)
+  deadline         DateTime?
+
+  // Raw source data for reference/re-normalization
+  rawData          String?       // JSON
+
+  // Lifecycle
+  isActive         Boolean       @default(true)
+  discoveredAt     DateTime      @default(now())
+  lastSeenAt       DateTime?
+  lastCheckedAt    DateTime?
+
+  // Relations
+  discoveries      JobDiscovery[]
+  matches          JobMatch[]
+  applications     Application[]
+
+  @@unique([sourceId, sourceJobId]) // canonical job is unique per source + source job id
+  @@index([sourceId])
+  @@index([opportunityType])
+  @@index([workArrangement])
+  @@map("jobs")
+}
+
+// Source — canonical metadata about a job source adapter.
+model Source {
+  id                    String       @id @default(uuid())
+  name                  String       @unique // human-readable source name
+  adapterName           String       @unique // code-friendly adapter identifier
+  isActive              SourceStatus @default(Active)
+  supportsOpportunityTypes String     // JSON array of OpportunityType values this source can yield
+  supportsLocations     String?      // JSON or text describing location coverage
+  lastCheckedAt         DateTime?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  jobs                  Job[]
+
+  @@map("sources")
+}
+
+// Per-user/per-profile discovery record for a canonical Job.
+// One row per (profile, job). Stores seen/saved/dismissed/applied status.
+model JobDiscovery {
+  id           String           @id @default(uuid())
+  userId       String
+  user         User             @relation("DiscoveredByUser", fields: [userId], references: [id])
+  profileId    String
+  profile      Profile          @relation("DiscoveredByProfile", fields: [profileId], references: [id])
+  jobId        String
+  job          Job              @relation(fields: [jobId], references: [id])
+
+  discoveredAt DateTime         @default(now())
+  seenAt       DateTime?
+  saved        Boolean          @default(false)
+  dismissed    Boolean          @default(false)
+  status       DiscoveryStatus  @default(New)
+  lastMatchedAt DateTime?
+
+  @@unique([profileId, jobId])  // one discovery record per profile + job
+  @@index([profileId])
+  @@index([jobId])
+  @@map("job_discoveries")
+}
+
+// Per-user/per-profile match result for a canonical Job.
+// One row per (profile, job). Contains layered match data + provenance.
+model JobMatch {
+  id              String             @id @default(uuid())
+  userId          String
+  user            User               @relation("MatchedForUser", fields: [userId], references: [id])
+  profileId       String
+  profile         Profile            @relation("MatchedForProfile", fields: [profileId], references: [id])
+  jobId           String
+  job             Job                @relation(fields: [jobId], references: [id])
+
+  // Layered matching
+  hardFilterPassed  Boolean          // did the job pass the user's hard filters?
+  hardFilterDetails String?          // JSON: which hard filters passed/failed and why
+  ruleBasedPassed   Boolean?         // did rule-based matching pass?
+  ruleBasedDetails  String?          // JSON: rule-based outcome + reason
+  matchScore        Float?           // AI match score (0-1 or similar)
+  relevance         String?          // qualitative relevance label
+  matchReasons      String?          // JSON or text: human-readable reasons why it matches
+  missingRequirements String?        // JSON or text: what the job asks for that the profile doesn't clearly show
+  recommendation    MatchRecommendation @default(NotRelevant)
+
+  // Provenance / reproducibility
+  matcherVersion    String?          // version of the matching logic that produced this result
+  aiProvider        String?          // which AI provider was used (if AI was used)
+  aiModel           String?          // which AI model was used (if AI was used)
+  aiPromptVersion   String?          // version of the prompt template used (if AI was used)
+  ruleBasedVersion  String?          // version of the rule-based matcher (if used)
+  matchedAt         DateTime         @default(now())
+  reMatchedAt       DateTime?
+
+  @@unique([profileId, jobId])  // one match record per profile + job
+  @@index([profileId])
+  @@index([jobId])
+  @@map("job_matches")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Applications (Phase 3+ entity — schema-ready now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Application {
+  id               String          @id @default(uuid())
+  userId           String
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profileId        String
+  profile          Profile         @relation(fields: [profileId], references: [id])
+  cvId             String
+  cv               Cv              @relation(fields: [cvId], references: [id])
+
+  // The canonical job this application targets
+  jobId            String
+  job              Job             @relation(fields: [jobId], references: [id])
+
+  // Method
+  method           String          // "browser" | "email" | "direct" | "other"
+  methodDetails    String?         // JSON: method-specific details (which URL, which email address, etc.)
+
+  // State machine (approval-first)
+  state            ApplicationState @default(Draft)
+  stateChangedAt   DateTime        @default(now())
+  submittedAt      DateTime?
+  responseAt       DateTime?
+
+  // Notes + snapshot
+  notes            String?
+  submittedSnapshot String?        // JSON: what was submitted (filled form data, email content, CV used, etc.)
+
+  // Approval
+  approvalRequired Boolean        @default(true) // default is always approval-first
+
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  // Prevent duplicate applications from the same profile to the same job
+  // (one application per profile + job is the default policy; re-application
+  // can be allowed later via a separate "reapply" path or by relaxing this
+  // constraint in specific cases).
+  @@unique([profileId, jobId])
+  @@index([userId])
+  @@index([profileId])
+  @@index([jobId])
+  @@index([state])
+  @@map("applications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scheduled searches (Phase 6+ entity — schema-ready now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ScheduledSearch {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profileId     String
+  profile       Profile  @relation(fields: [profileId], references: [id])
+  name          String
+  cronExpression String?
+  intervalSec   Int?     // alternative to cron: run every N seconds
+  sourceIds     String   // JSON array of Source.id values to use (empty = all active sources)
+  enabled       Boolean  @default(true)
+  lastRunAt     DateTime?
+  nextRunAt     DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@index([profileId])
+  @@index([nextRunAt])
+  @@map("scheduled_searches")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Notifications (Phase 6+ entity — schema-ready now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String?          // JSON or text
+  link      String?
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId])
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Stored secrets (encrypted, for per-user API keys / credentials)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model StoredSecret {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   String   // what this secret is for (e.g. "job_source_api_key", "email_smtp_password")
+  value     String   // encrypted value (stored encrypted; the encryption happens in the application layer)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, purpose])
+  @@index([userId])
+  @@map("stored_secrets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Audit log (Phase 7+ — schema-ready now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  entityType String  // e.g. "Application", "Profile", "Cv", "JobDiscovery"
+  entityId  String
+  action    String   // e.g. "created", "state_changed", "approved", "submitted"
+  before    String?  // JSON snapshot before the change
+  after     String?  // JSON snapshot after the change
+  details   String?  // JSON: additional context (e.g. which fields changed, who approved, etc.)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
